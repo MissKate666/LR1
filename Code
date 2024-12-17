@@ -25,16 +25,6 @@ def index():
     return render_template('index.html')
 
 
-@app.route('/users')
-def users():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM userss")
-    users = cursor.fetchall()
-    conn.close()
-    return render_template('users.html', users=users)
-
-
 @app.route('/manage_bot', methods=['GET', 'POST'])
 def manage_bot():
     if request.method == 'POST':
