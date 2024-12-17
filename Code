@@ -1,0 +1,220 @@
+from flask import Flask, render_template, request, redirect, url_for
+from flask_bootstrap5 import Bootstrap
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
+import random
+import threading
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+
+app = Flask(__name__)
+bootstrap = Bootstrap(app)
+
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://postgres:THE_BEST_PA$$WORD@localhost/laba')
+
+
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/users')
+def users():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM userss")
+    users = cursor.fetchall()
+    conn.close()
+    return render_template('users.html', users=users)
+
+
+@app.route('/manage_bot', methods=['GET', 'POST'])
+def manage_bot():
+    if request.method == 'POST':
+        button_text = request.form.get('button_text')
+        command = request.form.get('callback_data')
+
+        # Добавить новый пункт в Telegram bot
+        add_telegram_button(button_text, command)
+
+        return redirect(url_for('manage_bot'))
+
+    return render_template('manage_bot.html')
+
+
+TOKEN = '7817689175:AAHDd4O9asAw2AArkmX7_PQ2cewI6MoCD48'
+
+words = ["кошка", "собака", "машина", "дерево", "река", "дом", "цветок", "стол", "книга"]
+hints = {
+    "кошка": "Это домашнее животное, часто ловит мышей.",
+    "собака": "Верный друг человека.",
+    "машина": "Транспортное средство на колесах.",
+    "дерево": "Это растет в лесу и в парках.",
+    "река": "Течет и впадает в море или океан.",
+    "дом": "Место, где люди живут.",
+    "цветок": "Красивый и часто пахучий элемент растений.",
+    "стол": "Мебель для работы или еды.",
+    "книга": "Многостраничный объект для чтения."
+}
+
+# Хранение пользовательских кнопок в оперативной памяти
+# В продуктиве стоит хранить эти данные в базе данных
+custom_buttons = []
+
+def add_telegram_button(text, callback_data):
+    custom_buttons.append({'text': text, 'callback_data': callback_data})
+
+
+async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    await message.reply_text(
+        'Для регистрации введите ваш уникальный Telegram ID и имя пользователя через пробел.\nПример: 12345678 Tanya')
+
+
+async def handle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    try:
+        text = update.message.text.strip()
+        telegram_id, username = text.split(' ', 1)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO userss (telegram_id, username) VALUES (%s, %s)", (telegram_id, username))
+        conn.commit()
+        conn.close()
+
+        await message.reply_text(f'Вы успешно зарегистрированы как {username} с Telegram ID {telegram_id}.')
+    except ValueError:
+        await message.reply_text('Пожалуйста, введите ваш Telegram ID и имя пользователя через пробел.')
+    except Exception as e:
+        await message.reply_text(f'Ошибка при регистрации: {e}')
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = [
+        [InlineKeyboardButton("Факты", callback_data='fact')],
+        [InlineKeyboardButton("Помощь", callback_data='help')],
+        [InlineKeyboardButton("Игра", callback_data='play')],
+        [InlineKeyboardButton("Регистрация", callback_data='register')],
+    ]
+    for button in custom_buttons:
+        keyboard.append([InlineKeyboardButton(button['text'], callback_data=button['callback_data'])])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Привет! Я должен служить тебе. Выберите опцию:', reply_markup=reply_markup)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    await message.reply_text(
+        'Доступные команды:\n/start - начало работы\n/fact - факт о воде\n/play - игра в слова\n/register - регистрация\n/help - помощь')
+
+
+async def fact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    facts = [
+        "Вода составляет примерно 71% поверхности Земли.",
+        "Около 1/6 всего объема воды содержится в ледяных шапках и ледниках.",
+        "Вода в жидком состоянии является фазой, в которой водные молекулы соединены водородными связями."
+    ]
+    random_fact = random.choice(facts)
+    await message.reply_text(f"Вот интересный факт о воде: {random_fact}")
+
+
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    word = random.choice(words)
+    context.user_data['play'] = {
+        'word': word,
+        'hints_used': 0
+    }
+    await message.reply_text("Я загадал слово, попробуй угадать его! Чтобы завершить игру, напишите /stop.")
+
+
+async def check_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message or update.callback_query.message
+    if 'play' not in context.user_data:
+        await message.reply_text("У вас нет активной игры. Начните ее с команды /play.")
+        return
+
+    user_guess = update.message.text.strip().lower()
+    game_data = context.user_data['play']
+    correct_word = game_data['word']
+
+    if user_guess == '/stop':
+        await message.reply_text("Игра была остановлена. Спасибо за игру!")
+        del context.user_data['play']
+    elif user_guess == correct_word:
+        await message.reply_text(f"Да! Ты угадал слово: {correct_word}. Поздравляю!")
+        del context.user_data['play']
+    else:
+        game_data['hints_used'] += 1
+        if game_data['hints_used'] == 1:
+            hint = hints.get(correct_word, "Без подсказки.")
+            await message.reply_text(f"Нет, не угадал. Вот подсказка: {hint}")
+        else:
+            await message.reply_text("Нет, не угадал. Попробуй еще раз! Или напиши /stop")
+
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    command = query.data
+
+    if command == 'fact':
+        await fact(query, context)
+    elif command == 'help':
+        await help_command(query, context)
+    elif command == 'play':
+        await play(query, context)
+    elif command == 'register':
+        await register(query, context)
+    else:
+        # Обработка пользовательских команд
+        await query.edit_message_text(f'Вы вызвали команду: {command}')
+
+
+def run_flask():
+    app.run(port=5000, use_reloader=False)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f'Ошибка: {context.error}')
+    try:
+        if update.effective_message:
+            await update.effective_message.reply_text('Произошла ошибка. Пожалуйста, попробуйте снова позже.')
+    except:
+        pass
+
+def run_telegram_bot():
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("fact", fact))
+    application.add_handler(CommandHandler("play", play))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_registration))
+    application.add_handler(CommandHandler("stop", check_guess))
+    application.add_handler(CommandHandler("register", register))
+    # application.add_error_handler(error_handler)
+
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    telegram_thread = threading.Thread(target=run_telegram_bot)
+
+    flask_thread.start()
+    telegram_thread.start()
+
+    flask_thread.join()
+    telegram_thread.join()
